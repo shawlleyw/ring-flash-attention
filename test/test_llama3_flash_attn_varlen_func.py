@@ -22,8 +22,8 @@ if __name__ == "__main__":
     dropout_p = 0
     causal = True
     deterministic = False
-
-    cu_seqlens = [0, 120, 1248, 4232]
+    seq_len = 32 * 1024
+    cu_seqlens = [i * seq_len for i in range(5)]
     cu_seqlens_tensor = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
     max_seqlen = (cu_seqlens_tensor[1:] - cu_seqlens_tensor[:-1]).max().item()
     total_length = cu_seqlens[-1]
@@ -78,42 +78,54 @@ if __name__ == "__main__":
         rank=rank,
         world_size=world_size,
     )
-
-    llama3_out, llama3_lse, _ = llama3_flash_attn_varlen_qkvpacked_func(
-        local_qkv,
-        local_cu_seqlens_q,
-        local_cu_seqlens_k,
-        max_seqlen_q,
-        max_seqlen_k,
-        heads_k_stride=1,
-        local_k_slice=local_k_slice,
-        dropout_p=dropout_p,
-        causal=causal,
-        window_size=(-1, -1),
-        alibi_slopes=None,
-        deterministic=deterministic,
-        return_attn_probs=True,
+    prof = torch.profiler.profile(
+        schedule=torch.profiler.schedule(wait=1, warmup=2, active=2, repeat=1),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler('./prof_llama3_varlen'),
+        record_shapes=False,
+        with_stack=False
     )
 
-    log("out", out, rank0_only=True)
-    log("out diff", local_out - llama3_out)
-    log("lse", lse, rank0_only=True)
-    log("lse diff", local_lse - llama3_lse)
+    prof.start()
+    for i in range(5):
+        prof.step()
+        llama3_out, llama3_lse, _ = llama3_flash_attn_varlen_qkvpacked_func(
+            local_qkv,
+            local_cu_seqlens_q,
+            local_cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            heads_k_stride=1,
+            local_k_slice=local_k_slice,
+            dropout_p=dropout_p,
+            causal=causal,
+            window_size=(-1, -1),
+            alibi_slopes=None,
+            deterministic=deterministic,
+            return_attn_probs=True,
+        )
+        llama3_out.backward(local_dout)
+
+    prof.stop()
+
+    # log("out", out, rank0_only=True)
+    # log("out diff", local_out - llama3_out)
+    # log("lse", lse, rank0_only=True)
+    # log("lse diff", local_lse - llama3_lse)
 
     dist.barrier()
-    if rank == 0:
-        print("#" * 30)
-        print("# backward:")
-        print("#" * 30)
+    # if rank == 0:
+    #     print("#" * 30)
+    #     print("# backward:")
+    #     print("#" * 30)
 
-    out.backward(dout)
-    dqkv = qkv.grad
-    local_dqkv = dqkv[rank * local_length : (rank + 1) * local_length]
+    # out.backward(dout)
+    # dqkv = qkv.grad
+    # local_dqkv = dqkv[rank * local_length : (rank + 1) * local_length]
 
-    llama3_out.backward(local_dout)
-    llama3_dqkv = local_qkv.grad
+    # llama3_out.backward(local_dout)
+    # llama3_dqkv = local_qkv.grad
 
-    log("local_dq", local_dqkv[:, 0])
-    log("dq diff", local_dqkv[:, 0] - llama3_dqkv[:, 0])
-    log("dk diff", local_dqkv[:, 1] - llama3_dqkv[:, 1])
-    log("dv diff", local_dqkv[:, 2] - llama3_dqkv[:, 2])
+    # log("local_dq", local_dqkv[:, 0])
+    # log("dq diff", local_dqkv[:, 0] - llama3_dqkv[:, 0])
+    # log("dk diff", local_dqkv[:, 1] - llama3_dqkv[:, 1])
+    # log("dv diff", local_dqkv[:, 2] - llama3_dqkv[:, 2])
