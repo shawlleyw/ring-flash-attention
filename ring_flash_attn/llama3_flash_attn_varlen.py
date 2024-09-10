@@ -9,15 +9,21 @@ from .utils import get_default_args
 class AsyncHandles:
 
     def __init__(self) -> None:
-        self.handles = []
+        # self.handles = []
+        self.streams = []
     
-    def register(self, handle):
-        self.handles.append(handle)
+    def register(self, f):
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            f()
+        self.streams.append(stream)
 
     def wait(self):
-        for handle in self.handles:
-            handle.wait()
-        self.handles = []
+        # for handle in self.handles:
+        #     handle.wait()
+        for stream in self.streams:
+            torch.cuda.current_stream().wait_stream(stream)
+        self.streams = []
 
 def llama3_flash_attn_prepare_cu_seqlens(cu_seqlens, causal, rank, world_size):
     total_length = cu_seqlens[-1].item()
@@ -96,8 +102,8 @@ def llama3_flash_attn_varlen_forward(
     v_0 = v[:, : heads_k_stride].contiguous()
     async_handles = AsyncHandles()
 
-    async_handles.register(handle=dist.all_gather_into_tensor(kv_buffer_copy[0], k_0, group=process_group, async_op=True))
-    async_handles.register(dist.all_gather_into_tensor(kv_buffer_copy[1], v_0, group=process_group, async_op=True))
+    async_handles.register(lambda: dist.all_gather_into_tensor(kv_buffer_copy[0], k_0, group=process_group, async_op=True))
+    async_handles.register(lambda: dist.all_gather_into_tensor(kv_buffer_copy[1], v_0, group=process_group, async_op=True))
 
     for i in range(0, nheads_k, heads_k_stride):
         async_handles.wait()
@@ -109,8 +115,8 @@ def llama3_flash_attn_varlen_forward(
             kv_slice_right = kv_slice_left + heads_k_stride
             send_k = k[:, kv_slice_left : kv_slice_right].contiguous()
             send_v = v[:, kv_slice_left : kv_slice_right].contiguous()
-            async_handles.register(dist.all_gather_into_tensor(kv_buffer_copy[0], send_k, group=process_group, async_op=True))
-            async_handles.register(dist.all_gather_into_tensor(kv_buffer_copy[1], send_v, group=process_group, async_op=True))
+            async_handles.register(lambda: dist.all_gather_into_tensor(kv_buffer_copy[0], send_k, group=process_group, async_op=True))
+            async_handles.register(lambda: dist.all_gather_into_tensor(kv_buffer_copy[1], send_v, group=process_group, async_op=True))
 
         q_i = q[:, i * nheads // nheads_k : (i + heads_k_stride) * nheads // nheads_k]
         k_i = kv_buffer[0][local_k_slice]
@@ -197,8 +203,8 @@ def llama3_flash_attn_varlen_backward(
 
     k_0 = k[:, : heads_k_stride].contiguous()
     v_0 = v[:, : heads_k_stride].contiguous()
-    async_handles.register(dist.all_gather_into_tensor(kv_buffer_copy[0], k_0, group=process_group, async_op=True))
-    async_handles.register(dist.all_gather_into_tensor(kv_buffer_copy[1], v_0, group=process_group, async_op=True))
+    async_handles.register(lambda: dist.all_gather_into_tensor(kv_buffer_copy[0], k_0, group=process_group, async_op=True))
+    async_handles.register(lambda: dist.all_gather_into_tensor(kv_buffer_copy[1], v_0, group=process_group, async_op=True))
 
     for i in range(0, nheads_k, heads_k_stride):
         dkv_buffer.zero_()
@@ -221,8 +227,8 @@ def llama3_flash_attn_varlen_backward(
             kv_slice_right = kv_slice_left + heads_k_stride
             send_k = k[:, kv_slice_left : kv_slice_right].contiguous()
             send_v = v[:, kv_slice_left : kv_slice_right].contiguous()
-            async_handles.register(dist.all_gather_into_tensor(kv_buffer_copy[0], send_k, group=process_group, async_op=True))
-            async_handles.register(dist.all_gather_into_tensor(kv_buffer_copy[1], send_v, group=process_group, async_op=True))
+            async_handles.register(lambda: dist.all_gather_into_tensor(kv_buffer_copy[0], send_k, group=process_group, async_op=True))
+            async_handles.register(lambda: dist.all_gather_into_tensor(kv_buffer_copy[1], send_v, group=process_group, async_op=True))
 
         k_i = kv_buffer[0][local_k_slice]
         v_i = kv_buffer[1][local_k_slice]
