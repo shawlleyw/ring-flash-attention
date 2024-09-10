@@ -84,7 +84,6 @@ def llama3_flash_attn_varlen_forward(
     assert nheads_k % heads_k_stride == 0
 
     world_size = dist.get_world_size(process_group)
-
     kv_buffer = torch.empty(
         (2, total_k * world_size, heads_k_stride, head_dim),
         dtype=k.dtype,
@@ -95,10 +94,10 @@ def llama3_flash_attn_varlen_forward(
 
     k_0 = k[:, : heads_k_stride].contiguous()
     v_0 = v[:, : heads_k_stride].contiguous()
-    dist.all_gather_into_tensor(kv_buffer_copy[0], k_0, group=process_group, async_op=True)
-    dist.all_gather_into_tensor(kv_buffer_copy[1], v_0, group=process_group, async_op=True)
-
     async_handles = AsyncHandles()
+
+    async_handles.register(handle=dist.all_gather_into_tensor(kv_buffer_copy[0], k_0, group=process_group, async_op=True))
+    async_handles.register(dist.all_gather_into_tensor(kv_buffer_copy[1], v_0, group=process_group, async_op=True))
 
     for i in range(0, nheads_k, heads_k_stride):
         async_handles.wait()
